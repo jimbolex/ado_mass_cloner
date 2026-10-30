@@ -131,22 +131,15 @@ else {
 # COPY RELATED RELATION
 # ------------------------------------------------------------
 
-if ($null -ne $workItem) {
+Write-Host "Related: $($workItem.url)"
 
-    Write-Host "Related: $($workItem.url)"
-
-    $body += @{
-        op   = "add"
-        path = "/relations/-"
-        value = @{
-            rel = "System.LinkTypes.Related"
-            url = $workItem.url
-        }
+$body += @{
+    op   = "add"
+    path = "/relations/-"
+    value = @{
+        rel = "System.LinkTypes.Related"
+        url = $workItem.url
     }
-}
-else {
-
-    Write-Host "Related: None"
 }
 
 
@@ -256,17 +249,9 @@ foreach ($attachmentRelation in $attachmentRelations) {
         Write-Host "Attachment ID: $($uploadedAttachment.id)"
         Write-Host "Attachment URL: $($uploadedAttachment.url)"
 
-    # ----------------------------------------------------
-    # Link uploaded attachment to cloned work item
-    # ----------------------------------------------------
-
-        $attachmentAttributes = @{
-            name = $fileName
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($comment)) {
-            $attachmentAttributes.comment = $comment
-        }
+        # ----------------------------------------------------
+        # Link uploaded attachment to cloned work item
+        # ----------------------------------------------------
 
         $attachmentPatch = ConvertTo-Json -InputObject @(
             @{
