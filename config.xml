@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<Configuration>
+
+    <AzureDevOps>
+        <OrganizationUrl>https://upsdiv.visualstudio.com</OrganizationUrl>
+        <Project>Core</Project>
+    </AzureDevOps>
+
+    <Destination>
+        <AreaPath>Core</AreaPath>
+        <IterationPath>Core</IterationPath>
+    </Destination>
+
+    <CloneOptions>
+        <CopyAttachments>true</CopyAttachments>
+    </CloneOptions>
+
+    <UserStories>
+       <InputFolder>Input</InputFolder>
+    </UserStories>
+
+</Configuration>
