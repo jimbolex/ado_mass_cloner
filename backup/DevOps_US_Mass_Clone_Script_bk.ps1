@@ -14,15 +14,64 @@ if (-not (Test-Path $configPath)) {
 
 [xml]$config = Get-Content $configPath
 
+$replaceQAWithUAT = [System.Convert]::ToBoolean(
+    $config.Configuration.CloneOptions.ReplaceQAWithUAT
+)
+
+$delayBetweenStoriesSeconds = [int](
+    $config.Configuration.CloneOptions.DelayBetweenStoriesSeconds
+)
+
+$useLocalFolder = [System.Convert]::ToBoolean(
+    $config.Configuration.UserStoriesSource.UseLocalFolder
+)
 
 # Reading Input folder
 
-$inputFolderName = $config.Configuration.UserStories.InputFolder
-$inputFolder = Join-Path $PSScriptRoot $inputFolderName
+if($useLocalFolder){
 
-if (-not (Test-Path $inputFolder)) {
+    $inputFolderName = $config.Configuration.UserStoriesSource.LocalFolder.InputFolder
+    
+    if ([System.IO.Path]::IsPathRooted($inputFolderName)) {
+
+        # Absolute path provided
+        $inputFolder = $inputFolderName
+
+    }
+    else {
+
+        # Relative path provided
+        $inputFolder = Join-Path `
+            -Path $PSScriptRoot `
+            -ChildPath $inputFolderName
+    }
+
+}
+else {
+
+    $inputFolderName = $config.Configuration.UserStoriesSource.OneDrive.InputFolder
+    $oneDriveRoot = $env:OneDriveCommercial
+
+    if ([string]::IsNullOrWhiteSpace($oneDriveRoot)) {
+        throw "Conduent OneDrive could not be detected."
+    }
+
+    $inputFolder = Join-Path `
+        -Path $oneDriveRoot `
+        -ChildPath $inputFolderName 
+
+}
+
+
+if (-not (Test-Path $inputFolder -PathType Container)) {
     throw "User Story input folder was not found: $inputFolder"
 }
+
+
+Write-Host ""
+Write-Host "User Story input folder:"
+Write-Host $inputFolder
+
 
 $inputFiles = @(
     Get-ChildItem `
@@ -85,17 +134,35 @@ foreach ($file in $inputFiles) {
             continue
         }
 
-        # Validate Azure DevOps Work I*em ID
-        $parsedId = 0
-
-        if ([int]::TryParse($value, [ref]$parsedId)) {
-
-            $workItemIds += $parsedId
-
+        # Ignore comments starting with #
+        if ($value.StartsWith("#")) {
+            continue
         }
-        else {
 
-            Write-Warning "Invalid User Story ID '$value' is $($file.Name)"
+        # Split line by comma
+        $values = $line -split ","
+
+        foreach ($value in $values) {
+
+            $value = $value.Trim()
+
+            # Ignore empty values
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                continue
+            }
+
+            $parsedId = 0
+
+            if ([int]::TryParse($value, [ref]$parsedId)) {
+
+                $workItemIds += $parsedId
+
+            }
+            else {
+
+                Write-Warning "Invalid User Story ID '$value' in $($file.Name)"
+            }
+
         }
     }
 }
@@ -144,10 +211,13 @@ foreach ($workItemId in $workItemIds) {
             -Method Get `
             -Headers $headers
 
+        $sourceTitle = $workItem.fields.'System.Title'
+        $sourceDescription = $workItem.fields.'System.Description'
+
         Write-Host ""
         Write-Host "Original User Story:"
         Write-Host "ID:    $($workItem.id)"
-        Write-Host "Title: $($workItem.fields.'System.Title')"
+        Write-Host "Title: $($sourceTitle)"
 
         # ------------------------------------------------------------
         # BUILD NEW USER STORY
@@ -155,8 +225,37 @@ foreach ($workItemId in $workItemIds) {
 
         $body = @()
 
-        # Add a title marker so the clone is easy to identify.
-        $cloneTitle = "$($workItem.fields.'System.Title') - Copy"
+        # ------------------------------------------------------------
+        # MODIFIYING CLONE TITLE AND DESCRIPTION
+        # ------------------------------------------------------------
+
+        $cloneDescription = $sourceDescription
+
+        if ($replaceQAWithUAT -and $sourceTitle -match '\bQA\b') {
+
+            # Replace QA with UAT
+            $cloneTitle = $sourceTitle -replace '\bQA\b', 'UAT'
+            $cloneDescription = $sourceDescription -replace '\bQA\b', 'UAT'
+
+        }
+        elseif ($sourceTitle -match '\s*-\s*\[Part\s+(\d+)\]\s*$') {
+
+            # Existing Part number found at the end of the title
+            $currentPart = [int]$Matches[1]
+            $nextPart = $currentPart + 1
+
+            $cloneTitle = $sourceTitle -replace `
+                '\s*-\s*\[Part\s+\d+\]\s*$',
+                " - [Part $nextPart]"
+
+        }
+        else {
+
+            # No QA replacement and no existing Part number
+            $cloneTitle = "$sourceTitle - [Part 2]"
+
+        }
+
 
         # Title
         $body += @{
@@ -180,12 +279,12 @@ foreach ($workItemId in $workItemIds) {
         }
 
         # Description
-        if ($null -ne $workItem.fields.'System.Description') {
+        if (-not [string]::IsNullOrWhiteSpace($cloneDescription)) {
 
             $body += @{
                 op    = "add"
                 path  = "/fields/System.Description"
-                value = $workItem.fields.'System.Description'
+                value = $cloneDescription
             }
         }
 
@@ -261,7 +360,42 @@ foreach ($workItemId in $workItemIds) {
 
         $createUrl = "$organizationUrl/$project/_apis/wit/workitems/`$$encodedWorkItemType"+"?api-version=7.1"
 
+        # TEMP------------------------------
+        Write-Host ""
+        Write-Host "Validating clone fields..."
+
+        foreach ($operation in $body) {
+
+            if ($operation.path -like "/fields/*") {
+
+                if ($null -eq $operation.value) {
+
+                    Write-Warning "NULL VALUE FOUND!"
+                    Write-Warning "Path: $($operation.path)"
+                }
+                else {
+
+                    Write-Host "$($operation.path) = $($operation.value)"
+                }
+            }
+        }
+        #TEMP-------------------------------
+
         $jsonBody = $body | ConvertTo-Json -Depth 10
+
+        # TEMP------------------------------
+        Write-Host ""
+        Write-Host "Creating clone..."
+        Write-Host "Source ID: $workItemId"
+        Write-Host "Source Title: $sourceTitle"
+        Write-Host "Source Description: $sourceDescription"
+        Write-Host "Title: $cloneTitle"
+        Write-Host "Create URL: $createUrl"
+        Write-Host ""
+        Write-Host "JSON BODY:"
+        Write-Host $jsonBody
+        Write-Host ""
+        #TEMP-------------------------------
 
         $newWorkItem = Invoke-RestMethod `
             -Uri $createUrl `
@@ -423,15 +557,16 @@ foreach ($workItemId in $workItemIds) {
                     # Verify relation returned by Azure DevOps
                     # ----------------------------------------------------
 
-                    # ----------------------------------------------------
-                    # Retrieve the cloned work item with expanded relations
-                    # ----------------------------------------------------
-
                     $verificationUrl = "$organizationUrl/$project/_apis/wit/workitems/$($newWorkItem.id)?`$expand=relations&api-version=7.1"
 
                     Write-Host ""
                     Write-Host "Verifying attachment..."
                     Write-Host "Verification URL: $verificationUrl"
+
+
+                    # ----------------------------------------------------
+                    # Retrieve the cloned work item with expanded relations
+                    # ----------------------------------------------------
 
                     $verifiedWorkItem = Invoke-RestMethod `
                         -Uri $verificationUrl `
@@ -517,6 +652,7 @@ foreach ($workItemId in $workItemIds) {
 
                     if (Test-Path $tempFilePath) {
                         Remove-Item $tempFilePath -Force
+                      
                     }
                 }
             }
@@ -542,10 +678,19 @@ foreach ($workItemId in $workItemIds) {
         Write-Warning "User Story $workItemId could not be cloned."
         Write-Warning $_.Exception.Message
 
+        if ($_.ErrorDetails.Message) {
+
+            Write-Host ""
+            Write-Host "Azure DevOps response:" -ForegroundColor Yellow
+            Write-Host $_.ErrorDetails.Message -ForegroundColor Yellow
+        }
+
+
+
         $cloneResults += [PSCustomObject]@{
             SourceId          = $workItemId
             CloneId           = $null
-            Title             = $null
+            Title             = $cloneTitle
             AttachmentsFound  = $null
             AttachmentsCopied = $null
             Status            = "Failed"
@@ -555,6 +700,14 @@ foreach ($workItemId in $workItemIds) {
         # IMPORTANT:
         # Continue processing the next User Story
         continue
+    }
+
+    if ($delayBetweenStoriesSeconds -gt 0) {
+
+        Write-Host ""
+        Write-Host "Waiting $delayBetweenStoriesSeconds second(s) before next User Story..."
+
+        Start-Sleep -Seconds $delayBetweenStoriesSeconds
     }
 }
 

@@ -3,21 +3,39 @@
 <Configuration>
 
     <AzureDevOps>
+
         <OrganizationUrl>https://upsdiv.visualstudio.com</OrganizationUrl>
         <Project>Core</Project>
+
     </AzureDevOps>
 
     <Destination>
+
         <AreaPath>Core</AreaPath>
         <IterationPath>Core</IterationPath>
+
     </Destination>
 
     <CloneOptions>
+
         <CopyAttachments>true</CopyAttachments>
+        <ReplaceQAWithUAT>true</ReplaceQAWithUAT>
+        <DelayBetweenStoriesSeconds>2</DelayBetweenStoriesSeconds>
+        
     </CloneOptions>
 
-    <UserStories>
-       <InputFolder>Input</InputFolder>
-    </UserStories>
+    <UserStoriesSource>
+
+        <UseLocalFolder>true</UseLocalFolder>
+
+        <LocalFolder>
+            <InputFolder>Input</InputFolder>        
+        </LocalFolder>
+
+        <OneDrive>
+            <InputFolder>UPS NON-CIM - US to Clone</InputFolder>
+        </OneDrive>
+
+    </UserStoriesSource>
 
 </Configuration>
