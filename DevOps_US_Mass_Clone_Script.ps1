@@ -42,6 +42,36 @@ $headers = @{
 # FUNCTIONS
 # ============================================================
 
+function Resolve-FolderPath {
+
+    param(
+        [Parameter(Mandatory)]
+        [string]$FolderPath
+    )
+
+
+    # ------------------------------------------------------------
+    # Resolve template directory
+    # ------------------------------------------------------------
+
+    if ([System.IO.Path]::IsPathRooted($FolderPath)) {
+
+        $resolvedTemplateFolder = $FolderPath
+    }
+    else {
+
+        $resolvedTemplateFolder = Join-Path `
+            -Path $PSScriptRoot `
+            -ChildPath $FolderPath
+    }
+
+    if (-not (Test-Path $resolvedTemplateFolder -PathType Container)) {
+        throw "The folder $resolvedTemplateFolder was not found."
+    }
+
+    return $resolvedTemplateFolder
+
+}
 
 function Get-UserStoryInputFolder { 
 
@@ -59,21 +89,9 @@ function Get-UserStoryInputFolder {
     if($useLocalFolder){
 
         $inputFolderName = $Config.Configuration.UserStoriesSource.LocalFolder.InputFolder
+
+        $inputFolder = Resolve-FolderPath -FolderPath $inputFolderName
     
-        if ([System.IO.Path]::IsPathRooted($inputFolderName)) {
-
-            # Absolute path provided
-            $inputFolder = $inputFolderName
-
-        }
-        else {
-
-            # Relative path provided
-            $inputFolder = Join-Path `
-                -Path $PSScriptRoot `
-                -ChildPath $inputFolderName
-        }
-
     }
     else {
 
@@ -98,7 +116,153 @@ function Get-UserStoryInputFolder {
     return $inputFolder
 }
 
-function Get-WorkItemIdsFromFiles { 
+function Get-UserStoryDoneFolder {
+
+    param (
+        [Parameter(Mandatory)]
+        [xml]$Config
+    )
+
+    $useLocalFolder = [System.Convert]::ToBoolean(
+        $Config.Configuration.UserStoriesSource.UseLocalFolder
+    )
+
+    if ($useLocalFolder) {
+
+        $doneFolderName = $Config.Configuration.UserStoriesSource.LocalFolder.DoneFolder
+
+        $doneFolder = Resolve-FolderPath -FolderPath $doneFolderName
+    }
+    else {
+
+        $doneFolderName = $Config.Configuration.UserStoriesSource.OneDrive.DoneFolder
+        $oneDriveRoot = $env:OneDriveCommercial
+
+        if ([string]::IsNullOrWhiteSpace($oneDriveRoot)) {
+            throw "Conduent OneDrive could not be detected."
+        }
+
+        $doneFolder = Join-Path `
+            -Path $oneDriveRoot `
+            -ChildPath $doneFolderName
+    }
+
+    if (-not (Test-Path $doneFolder -PathType Container)) {
+
+        New-Item -ItemType Directory -Path $doneFolder -Force | Out-Null
+    }
+
+    return $doneFolder
+}
+
+function Write-UserStoryArchive {
+
+    param (
+        [Parameter(Mandatory)]
+        [string]$DoneFolder,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [int[]]$WorkItemIds,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$CloneResults
+    )
+
+    $archiveName = (Get-Date).ToString("yyyyMMdd_HHmmss") + ".txt"
+
+    $archivePath = Join-Path -Path $DoneFolder -ChildPath $archiveName
+
+    if (Test-Path -LiteralPath $archivePath) {
+        throw "Archive file already exists: $archivePath"
+    }
+
+    $archiveLines = foreach ($workItemId in $WorkItemIds) {
+
+        $result = $CloneResults |
+            Where-Object { $_.SourceId -eq $workItemId } |
+            Select-Object -Last 1
+
+        if ($null -ne $result -and $result.Status -eq "Failed") {
+
+            # Keep the reason on one line so the parser can strip it on retry
+            $reason = ([string]$result.Error -replace '\s+', ' ').Trim()
+
+            "$workItemId # FAILED: $reason"
+        }
+        else {
+
+            "$workItemId"
+        }
+    }
+
+    Set-Content -LiteralPath $archivePath -Value $archiveLines -Encoding UTF8
+
+    return $archivePath
+}
+
+function Get-UserStoryTemplate {
+
+    param (
+        [Parameter(Mandatory)]
+        [xml]$Config
+    )
+
+    $useTemplate = [System.Convert]::ToBoolean(
+        $Config.Configuration.UserStoriesSource.UseTemplate
+    )
+
+    # Template functionality disabled
+    if (-not $useTemplate) {
+
+        return $null
+    }
+
+    $templateFolder = $Config.Configuration.UserStoriesSource.Template.Folder
+
+    $templateFileName = $Config.Configuration.UserStoriesSource.Template.FileName
+
+    # ------------------------------------------------------------
+    # Resolve template directory
+    # ------------------------------------------------------------
+
+    $resolvedTemplateFolder = Resolve-FolderPath -FolderPath $templateFolder
+ 
+    # ------------------------------------------------------------
+    # Build complete template filename
+    # ------------------------------------------------------------
+
+    $templatePath = Join-Path `
+        -Path $resolvedTemplateFolder `
+        -ChildPath $templateFileName
+
+    # ------------------------------------------------------------
+    # Validate template
+    # ------------------------------------------------------------
+
+    if (-not (Test-Path -Path $templatePath -PathType Leaf)) {
+
+        throw "User Story template file was not found: $templatePath"
+    }
+
+    return $templatePath
+}
+
+function Complete-UserStoryInputFile {
+    
+    param(
+        [Parameter(Mandatory)]
+        [xml]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$InputFiles
+    )
+    
+
+}
+
+function Get-InputTextFiles {
 
     param (
         [Parameter(Mandatory)]
@@ -116,10 +280,20 @@ function Get-WorkItemIdsFromFiles {
         throw "No .txt files were found in: $InputFolder"
     }
 
+    return $inputFiles
+}
+
+function Get-WorkItemIdsFromFiles { 
+
+    param (
+        [Parameter(Mandatory)]
+        [System.IO.FileInfo[]]$InputFiles
+    )
+
     # US(s) to clone
     $workItemIds = @()
 
-    foreach ($file in $inputFiles) {
+    foreach ($file in $InputFiles) {
 
         Write-Host "Reading: $($file.Name)"
 
@@ -129,13 +303,15 @@ function Get-WorkItemIdsFromFiles {
 
             $line = $line.Trim()
 
-            # Ignore blank lines
-            if ([string]::IsNullOrWhiteSpace($line)) {
-                continue
+            # Strip comments: full-line (# ...) or inline (12345 # FAILED: ...)
+            $commentIndex = $line.IndexOf("#")
+
+            if ($commentIndex -ge 0) {
+                $line = $line.Substring(0, $commentIndex).Trim()
             }
 
-            # Ignore comments starting with #
-            if ($line.StartsWith("#")) {
+            # Ignore blank lines
+            if ([string]::IsNullOrWhiteSpace($line)) {
                 continue
             }
 
@@ -197,7 +373,7 @@ function Get-AdoWorkItem {
     return Invoke-RestMethod `
         -Uri $url `
         -Method Get `
-        -Headers $headers
+        -Headers $Headers
 
 }
 
@@ -878,8 +1054,15 @@ function Invoke-UserStoryClone {
 # Obtains the input folder
 $inputFolder = Get-UserStoryInputFolder -Config $config
 
-# Checks for the right input file and for User Story ID's
-$workItemIds = Get-WorkItemIdsFromFiles -InputFolder $inputFolder
+# Resolved before cloning so a missing or invalid path fails before anything is cloned
+$doneFolder = Get-UserStoryDoneFolder -Config $config
+
+$templatePath = Get-UserStoryTemplate -Config $config
+
+# Checks for the right input files and for User Story ID's
+$inputFiles = Get-InputTextFiles -InputFolder $inputFolder
+
+$workItemIds = Get-WorkItemIdsFromFiles -InputFiles $inputFiles
 
 Write-Host ""
 Write-Host "Total unique User Stories found to clone: $($workItemIds.Count)"
@@ -972,3 +1155,36 @@ $cloneResults |
         AttachmentsCopied,
         Status `
         -AutoSize
+
+# ------------------------------------------------------------
+# ARCHIVE INPUT
+# Only reached when the run completes, so an interrupted run
+# leaves the input files in place for the next run.
+# ------------------------------------------------------------
+
+if ($workItemIds.Count -gt 0) {
+
+    $archivePath = Write-UserStoryArchive `
+        -DoneFolder $doneFolder `
+        -WorkItemIds $workItemIds `
+        -CloneResults $cloneResults
+
+    foreach ($inputFile in $inputFiles) {
+
+        Remove-Item -LiteralPath $inputFile.FullName -Force
+    }
+
+    Write-Host "Processed User Stories archived to: $archivePath"
+
+    if ($null -ne $templatePath) {
+
+        Copy-Item `
+            -LiteralPath $templatePath `
+            -Destination (Join-Path -Path $inputFolder -ChildPath "US To Clone.txt") `
+            -Force
+    }
+}
+else {
+
+    Write-Host "No User Stories found in input; input files left unchanged."
+}

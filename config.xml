@@ -26,15 +26,27 @@
 
     <UserStoriesSource>
 
-        <UseLocalFolder>true</UseLocalFolder>
+        <UseLocalFolder>false</UseLocalFolder>
+        <UseTemplate>true</UseTemplate>
+
+        <Template>
+            <Folder>Template</Folder>
+            <FileName>US To Clone Template.txt</FileName>
+        </Template>
 
         <LocalFolder>
-            <InputFolder>Input</InputFolder>        
+            <InputFolder>Input</InputFolder>
+            <DoneFolder>Input/Done</DoneFolder>
+            <RetryFolder>Input/Retry</RetryFolder>      
         </LocalFolder>
 
         <OneDrive>
             <InputFolder>UPS NON-CIM - US to Clone</InputFolder>
+            <DoneFolder>UPS NON-CIM - US to Clone/Done</DoneFolder>
+            <RetryFolder>UPS NON-CIM - US to Clone/Retry</RetryFolder>  
         </OneDrive>
+
+        
 
     </UserStoriesSource>
 
