@@ -26,7 +26,7 @@
 
     <UserStoriesSource>
 
-        <UseLocalFolder>false</UseLocalFolder>
+        <UseLocalFolder>true</UseLocalFolder>
         <UseTemplate>true</UseTemplate>
 
         <Template>
@@ -44,10 +44,13 @@
             <InputFolder>UPS NON-CIM - US to Clone</InputFolder>
             <DoneFolder>UPS NON-CIM - US to Clone/Done</DoneFolder>
             <RetryFolder>UPS NON-CIM - US to Clone/Retry</RetryFolder>  
-        </OneDrive>
-
-        
+        </OneDrive>       
 
     </UserStoriesSource>
+
+    <Retry>
+        <MaxAttempts>3</MaxAttempts>
+        <InitialDelaySeconds>2</InitialDelaySeconds>
+    </Retry>
 
 </Configuration>

@@ -19,24 +19,6 @@ $delayBetweenStoriesSeconds = [int](
     $config.Configuration.CloneOptions.DelayBetweenStoriesSeconds
 )
 
-# ============================================================
-# AUTHENTICATION
-# ============================================================
-
-$patSecure = Read-Host "Enter your Azure DevOps PAT" -AsSecureString
-
-$credential = New-Object `
-    System.Management.Automation.PSCredential("PAT", $patSecure)
-
-$pat = $credential.GetNetworkCredential().Password
-
-$base64AuthInfo = [Convert]::ToBase64String(
-    [Text.Encoding]::ASCII.GetBytes(":$pat")
-)
-
-$headers = @{
-    Authorization = "Basic $base64AuthInfo"
-}
 
 # ============================================================
 # FUNCTIONS
@@ -46,7 +28,9 @@ function Resolve-FolderPath {
 
     param(
         [Parameter(Mandatory)]
-        [string]$FolderPath
+        [string]$FolderPath,
+
+        [switch]$AllowMissing
     )
 
 
@@ -56,20 +40,21 @@ function Resolve-FolderPath {
 
     if ([System.IO.Path]::IsPathRooted($FolderPath)) {
 
-        $resolvedTemplateFolder = $FolderPath
+        $resolvedFolder = $FolderPath
     }
     else {
 
-        $resolvedTemplateFolder = Join-Path `
+        $resolvedFolder = Join-Path `
             -Path $PSScriptRoot `
             -ChildPath $FolderPath
     }
 
-    if (-not (Test-Path $resolvedTemplateFolder -PathType Container)) {
-        throw "The folder $resolvedTemplateFolder was not found."
+     if (-not $AllowMissing -and -not (Test-Path $resolvedFolder -PathType Container)) {
+      
+        throw "The folder $resolvedFolder was not found."
     }
 
-    return $resolvedTemplateFolder
+    return $resolvedFolder
 
 }
 
@@ -131,7 +116,7 @@ function Get-UserStoryDoneFolder {
 
         $doneFolderName = $Config.Configuration.UserStoriesSource.LocalFolder.DoneFolder
 
-        $doneFolder = Resolve-FolderPath -FolderPath $doneFolderName
+        $doneFolder = Resolve-FolderPath -FolderPath $doneFolderName -AllowMissing
     }
     else {
 
@@ -249,19 +234,6 @@ function Get-UserStoryTemplate {
     return $templatePath
 }
 
-function Complete-UserStoryInputFile {
-    
-    param(
-        [Parameter(Mandatory)]
-        [xml]$Config,
-
-        [Parameter(Mandatory)]
-        [string]$InputFiles
-    )
-    
-
-}
-
 function Get-InputTextFiles {
 
     param (
@@ -295,6 +267,7 @@ function Get-WorkItemIdsFromFiles {
 
     foreach ($file in $InputFiles) {
 
+        Write-Host ""
         Write-Host "Reading: $($file.Name)"
 
         $lines = Get-Content $file.FullName
@@ -804,13 +777,9 @@ function Copy-AdoAttachments {
 
             $updateUrl = "$OrganizationUrl/$Project/_apis/wit/workitems/"+"$DestinationWorkItemId"+"?api-version=7.1"
 
-            # ----------------------------------------------------
-            # TEST / DIAGNOSTIC OUTPUT
-            # ----------------------------------------------------
-
             Write-Host "Linking attachment to cloned User Story..."
 
-            $updatedWorkItem = Invoke-RestMethod `
+            $null = Invoke-RestMethod `
                 -Uri $updateUrl `
                 -Method Patch `
                 -Headers $Headers `
@@ -1044,9 +1013,6 @@ function Invoke-UserStoryClone {
 
 }
 
-
-
-
 # ============================================================
 # MAIN
 # ============================================================
@@ -1068,12 +1034,32 @@ Write-Host ""
 Write-Host "Total unique User Stories found to clone: $($workItemIds.Count)"
 Write-Host ""
 
+# AUTHENTICATION =============================================================
+if ($workItemIds.Count -gt 0) {
+    $patSecure = Read-Host "Enter your Azure DevOps PAT" -AsSecureString
+
+    $credential = New-Object `
+        System.Management.Automation.PSCredential("PAT", $patSecure)
+
+    $pat = $credential.GetNetworkCredential().Password
+
+    $base64AuthInfo = [Convert]::ToBase64String(
+        [Text.Encoding]::ASCII.GetBytes(":$pat")
+    )
+
+    $headers = @{
+        Authorization = "Basic $base64AuthInfo"
+    }
+}
+# ============================================================================
+
 # Cloning starts
 $cloneResults = @()
+$currentStoryNumber = 0
 
 foreach ($workItemId in $workItemIds) {
 
-
+    $currentStoryNumber++
     $cloneTitle = $null
     $newWorkItem = $null
     $attachmentRelations = @()
@@ -1114,19 +1100,17 @@ foreach ($workItemId in $workItemIds) {
             Title             = $cloneTitle
             AttachmentsFound  = $null
             AttachmentsCopied = $null
+            AttachmentsFailed = $null
             Status            = "Failed"
             Error             = $_.Exception.Message
         }
-
-        # IMPORTANT:
-        # Continue processing the next User Story
-        continue
     }
 
 
     # Delay between stories
 
-    if ($delayBetweenStoriesSeconds -gt 0) {
+    if ($delayBetweenStoriesSeconds -gt 0 -and
+        $currentStoryNumber -lt $workItemIds.Count) {
 
         Write-Host ""
         Write-Host "Waiting $delayBetweenStoriesSeconds second(s) before next User Story..."
@@ -1137,24 +1121,7 @@ foreach ($workItemId in $workItemIds) {
 }
 
 
-# ------------------------------------------------------------
-# DISPLAY RESULTS
-# ------------------------------------------------------------
- 
-Write-Host ""
-Write-Host "============================================"
-Write-Host "MASS CLONING COMPLETED"
-Write-Host "============================================"
-Write-Host ""
 
-$cloneResults |
-    Format-Table `
-        SourceId,
-        CloneId,
-        AttachmentsFound,
-        AttachmentsCopied,
-        Status `
-        -AutoSize
 
 # ------------------------------------------------------------
 # ARCHIVE INPUT
@@ -1174,6 +1141,25 @@ if ($workItemIds.Count -gt 0) {
         Remove-Item -LiteralPath $inputFile.FullName -Force
     }
 
+
+    # ------------------------------------------------------------
+    # DISPLAY RESULTS
+    # ------------------------------------------------------------
+     
+    Write-Host ""
+    Write-Host "============================================"
+    Write-Host "MASS CLONING COMPLETED"
+    Write-Host "============================================"
+    Write-Host ""
+
+    $cloneResults |
+        Format-Table `
+            SourceId,
+            CloneId,
+            AttachmentsFound,
+            AttachmentsCopied,
+            Status `
+            -AutoSize
     Write-Host "Processed User Stories archived to: $archivePath"
 
     if ($null -ne $templatePath) {
@@ -1187,4 +1173,5 @@ if ($workItemIds.Count -gt 0) {
 else {
 
     Write-Host "No User Stories found in input; input files left unchanged."
+    Write-Host ""
 }
