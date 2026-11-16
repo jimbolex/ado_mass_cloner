@@ -49,8 +49,8 @@
     </UserStoriesSource>
 
     <Retry>
-        <MaxAttempts>3</MaxAttempts>
-        <InitialDelaySeconds>2</InitialDelaySeconds>
+        <RetryAttempts>3</RetryAttempts>
+        <RetryDelaySeconds>2</RetryDelaySeconds>
     </Retry>
 
 </Configuration>
