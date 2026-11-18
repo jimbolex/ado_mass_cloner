@@ -4,7 +4,7 @@
 
     <AzureDevOps>
 
-        <OrganizationUrl>https://upsdiv.visualstudio.com</OrganizationUrl>
+        <OrganizationUrl>https://upsdiv.visualstudio.fail</OrganizationUrl>
         <Project>Core</Project>
 
     </AzureDevOps>

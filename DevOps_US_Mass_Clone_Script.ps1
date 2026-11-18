@@ -49,13 +49,85 @@ function Resolve-FolderPath {
             -ChildPath $FolderPath
     }
 
-     if (-not $AllowMissing -and -not (Test-Path $resolvedFolder -PathType Container)) {
+    if (-not $AllowMissing -and -not (Test-Path $resolvedFolder -PathType Container)) {
       
         throw "The folder $resolvedFolder was not found."
     }
 
     return $resolvedFolder
 
+}
+
+function Test-AdoRetryableException {
+
+    param (
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $retryableStatusCodes = @(
+        408, # Request Timeout
+        429, # Too Many Requests
+        500, # Internal Server Error
+        502, # Bad Gateway
+        503, # Service Unavailable
+        504  # Gateway Timeout
+    )
+
+    $statusCode = $null
+
+    # ------------------------------------------------------------
+    # Try to obtain HTTP status code
+    # ------------------------------------------------------------
+
+    if ($null -ne $ErrorRecord.Exception.Response) {
+
+        try {
+            $statusCode = [int]$ErrorRecord.Exception.Response.StatusCode
+        }
+        catch {
+            $statusCode = $null
+        }
+    }
+
+    # ------------------------------------------------------------
+    # Known transient HTTP failure
+    # ------------------------------------------------------------
+
+    if ($statusCode -in $retryableStatusCodes) {
+        return $true
+    }
+
+    # ------------------------------------------------------------
+    # HTTP response received, but status is not retryable
+    # ------------------------------------------------------------
+
+    if ($null -ne $statusCode) {
+        return $false
+    }
+
+    # ------------------------------------------------------------
+    # No HTTP response - inspect exception chain
+    # ------------------------------------------------------------
+
+    $exception = $ErrorRecord.Exception
+
+    while ($null -ne $exception) {
+
+        if (
+            $exception -is [System.Net.Http.HttpRequestException] -or
+            $exception -is [System.Net.Sockets.SocketException] -or
+            $exception -is [System.Net.WebException] -or
+            $exception -is [System.TimeoutException]
+        ) {
+
+            return $true
+        }
+
+        $exception = $exception.InnerException
+    }
+
+    return $false
 }
 
 function Invoke-AdoRestMethodWithRetry {
@@ -89,6 +161,7 @@ function Invoke-AdoRestMethodWithRetry {
                 Uri     = $Uri
                 Method  = $Method
                 Headers = $Headers
+                ErrorAction = 'Stop'
             }
 
             if (-not [string]::IsNullOrWhiteSpace($ContentType)) {
@@ -105,92 +178,104 @@ function Invoke-AdoRestMethodWithRetry {
         }
         catch {
 
-            $statusCode = $null
+            $isRetryable = Test-AdoRetryableException -ErrorRecord $_
 
-            if ($null -ne $_.Exception.Response) {
-
-                try {
-                    $statusCode = [int]$_.Exception.Response.StatusCode
-                }
-                catch {
-                    $statusCode = $null
-                }
-            }
-
-            # ----------------------------------------------------
-            # Determine whether failure is transient/retryable
-            # ----------------------------------------------------
-
-            $retryableStatusCodes = @(
-                408, # Request Timeout
-                429, # Too Many Requests
-                500, # Internal Server Error
-                502, # Bad Gateway
-                503, # Service Unavailable
-                504  # Gateway Timeout
-            )
-
-            $isRetryable = $false
-
-            # ----------------------------------------------------
-            # Retry known transient HTTP errors
-            # ----------------------------------------------------
-
-            if ($statusCode -in $retryableStatusCodes) {
-              
-                $isRetryable = $true
-            }
-
-            # ----------------------------------------------------
-            # Retry recognized network/connectivity failures
-            # ----------------------------------------------------
-            elseif ($null -eq $statusCode) {
-
-                $exception = $_.Exception
-
-                while ($null -ne $exception) {
-
-                    if (
-                        $exception -is [System.Net.Http.HttpRequestException] -or
-                        $exception -is [System.Net.Sockets.SocketException] -or
-                        $exception -is [System.Net.WebException] -or
-                        $exception -is [System.TimeoutException]
-                    ) {
-
-                        $isRetryable = $true
-                        break
-                    }
-
-                    $exception = $exception.InnerException
-                }
-            }
-
-            # ----------------------------------------------------
-            # Do not retry permanent failures
-            # ----------------------------------------------------
+            # ------------------------------------------------------------
+            # Permanent failure - do not retry
+            # ------------------------------------------------------------
 
             if (-not $isRetryable) {
-
                 throw
             }
 
-            # ----------------------------------------------------
+            # ------------------------------------------------------------
             # No attempts remaining
-            # ----------------------------------------------------
+            # ------------------------------------------------------------
 
             if ($attempt -ge $MaxAttempts) {
-
                 throw
             }
 
-            # ----------------------------------------------------
+            # ------------------------------------------------------------
             # Exponential backoff
-            # ----------------------------------------------------
+            # ------------------------------------------------------------
 
-            $delaySeconds = $RetryDelaySeconds * [Math]::Pow(2, $attempt - 1)
+            $delaySeconds = $RetryDelaySeconds * [math]::Pow(2, $attempt - 1)
 
             Write-Warning `
                 "Azure DevOps request failed. Retrying in $delaySeconds second(s) (attempt $($attempt + 1) of $MaxAttempts)..."
+
+            Start-Sleep -Seconds $delaySeconds
+        }
+    }
+}
+
+function Invoke-AdoDownloadWithRetry {
+
+    param (
+        [Parameter(Mandatory)]
+        [string]$Uri,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory)]
+        [string]$OutFile,
+
+        [Parameter(Mandatory)]
+        [int]$MaxAttempts,
+
+        [Parameter(Mandatory)]
+        [int]$RetryDelaySeconds
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+
+        try {
+
+            # Remove a partial file left by a previous failed attempt
+            if (Test-Path -LiteralPath $OutFile) {
+                Remove-Item -LiteralPath $OutFile -Force
+            }
+
+            Invoke-WebRequest `
+                -Uri $Uri `
+                -Method Get `
+                -Headers $Headers `
+                -OutFile $OutFile `
+                -ErrorAction Stop
+
+            return
+        }
+        catch {
+
+            $isRetryable = Test-AdoRetryableException `
+                -ErrorRecord $_
+
+            # ------------------------------------------------------------
+            # Permanent failure - do not retry
+            # ------------------------------------------------------------
+
+            if (-not $isRetryable) {
+                throw
+            }
+
+            # ------------------------------------------------------------
+            # No attempts remaining
+            # ------------------------------------------------------------
+
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+
+            # ------------------------------------------------------------
+            # Exponential backoff
+            # ------------------------------------------------------------
+
+            $delaySeconds = $RetryDelaySeconds * [math]::Pow(2, $attempt - 1)
+
+            Write-Warning `
+                "Attachment download failed. Retrying in $delaySeconds second(s) (attempt $($attempt + 1) of $MaxAttempts)..."
 
             Start-Sleep -Seconds $delaySeconds
         }
@@ -210,7 +295,7 @@ function Get-UserStoryInputFolder {
 
     # Reading Input folder
 
-    if($useLocalFolder){
+    if ($useLocalFolder) {
 
         $inputFolderName = $Config.Configuration.UserStoriesSource.LocalFolder.InputFolder
 
@@ -298,16 +383,16 @@ function Write-UserStoryArchive {
         throw "Archive file already exists: $archivePath"
     }
 
-     $archiveTable = $CloneResults |
-        Format-Table `
-            SourceId,
-            CloneId,
-            AttachmentsFound,
-            AttachmentsCopied,
-            AttachmentsFailed,
-            Status `
-            -AutoSize |
-        Out-String
+    $archiveTable = $CloneResults |
+    Format-Table `
+        SourceId,
+    CloneId,
+    AttachmentsFound,
+    AttachmentsCopied,
+    AttachmentsFailed,
+    Status `
+        -AutoSize |
+    Out-String
 
     Set-Content -LiteralPath $archivePath -Value $archiveTable.TrimEnd() -Encoding UTF8
 
@@ -369,10 +454,10 @@ function Get-InputTextFiles {
     )
 
     $inputFiles = @(
-    Get-ChildItem `
-        -Path $InputFolder `
-        -Filter "*.txt" `
-        -File
+        Get-ChildItem `
+            -Path $InputFolder `
+            -Filter "*.txt" `
+            -File
     )
 
     if ($inputFiles.Count -eq 0) {
@@ -447,14 +532,14 @@ function Get-WorkItemIdsFromFiles {
 
     return @(
         $workItemIds |
-            Sort-Object -Unique
+        Sort-Object -Unique
     )
 
 }
 
 function Get-AdoWorkItem {
 
-   param (
+    param (
         [Parameter(Mandatory)]
         [int]$WorkItemId,
 
@@ -476,10 +561,12 @@ function Get-AdoWorkItem {
 
     $url = "$OrganizationUrl/$Project/_apis/wit/workitems/$($WorkItemId)?`$expand=relations&api-version=7.1"
 
-    return Invoke-RestMethod `
+    return Invoke-AdoRestMethodWithRetry `
         -Uri $url `
         -Method Get `
-        -Headers $Headers
+        -Headers $Headers `
+        -MaxAttempts $MaxAttempts `
+        -RetryDelaySeconds $RetryDelaySeconds
 
 }
 
@@ -502,7 +589,7 @@ function Get-CloneTitleAndDescription {
     if (-not [string]::IsNullOrWhiteSpace($SourceDescription)) {
         $cloneDescription = $SourceDescription
     }
-    else{
+    else {
         $cloneDescription = "<p><strong>WARNING:</strong> No description was found on the original User Story. You must add it manually to this clone.</p>"
     }
 
@@ -526,7 +613,7 @@ function Get-CloneTitleAndDescription {
 
         $cloneTitle = $cloneTitle -replace `
             '\s*-\s*\[Part\s+\d+\]\s*$',
-            " - [Part $nextPart]"
+        " - [Part $nextPart]"
 
     }
     else {
@@ -640,18 +727,18 @@ function New-AdoUserStoryClone {
     # ------------------------------------------------------------
 
     $parentRelation = $SourceWorkItem.relations |
-        Where-Object {
-            $_.rel -eq "System.LinkTypes.Hierarchy-Reverse"
-        } |
-        Select-Object -First 1
+    Where-Object {
+        $_.rel -eq "System.LinkTypes.Hierarchy-Reverse"
+    } |
+    Select-Object -First 1
 
     if ($null -ne $parentRelation) {
 
         Write-Host "Parent: $($parentRelation.url)"
 
         $body += @{
-            op   = "add"
-            path = "/relations/-"
+            op    = "add"
+            path  = "/relations/-"
             value = @{
                 rel = "System.LinkTypes.Hierarchy-Reverse"
                 url = $parentRelation.url
@@ -670,8 +757,8 @@ function New-AdoUserStoryClone {
     Write-Host "Related: $($SourceWorkItem.url)"
 
     $body += @{
-        op   = "add"
-        path = "/relations/-"
+        op    = "add"
+        path  = "/relations/-"
         value = @{
             rel = "System.LinkTypes.Related"
             url = $SourceWorkItem.url
@@ -698,7 +785,7 @@ function New-AdoUserStoryClone {
 
     $encodedWorkItemType = [Uri]::EscapeDataString("User Story")
 
-    $createUrl = "$OrganizationUrl/$Project/_apis/wit/workitems/`$$encodedWorkItemType"+"?api-version=7.1"
+    $createUrl = "$OrganizationUrl/$Project/_apis/wit/workitems/`$$encodedWorkItemType" + "?api-version=7.1"
 
        
     $jsonBody = $body | ConvertTo-Json -Depth 10
@@ -719,7 +806,7 @@ function New-AdoUserStoryClone {
 
 function Test-AdoAttachment {
 
-   param (
+    param (
         [Parameter(Mandatory)]
         [int]$WorkItemId,
 
@@ -759,10 +846,10 @@ function Test-AdoAttachment {
 
         $linkedAttachment = @(
             $verifiedWorkItem.relations |
-                Where-Object {
-                    $_.rel -eq "AttachedFile" -and
-                    $_.url -like "*$AttachmentId*"
-                }
+            Where-Object {
+                $_.rel -eq "AttachedFile" -and
+                $_.url -like "*$AttachmentId*"
+            }
         )
 
         if ($linkedAttachment.Count -gt 0) {
@@ -784,7 +871,7 @@ function Test-AdoAttachment {
 
 function Copy-AdoAttachments {
 
-     param (
+    param (
         [Parameter(Mandatory)]
         [object]$SourceWorkItem,
 
@@ -839,8 +926,8 @@ function Copy-AdoAttachments {
         # Create a temporary local file path.
 
         $tempFilePath = Join-Path `
-        -Path ([System.IO.Path]::GetTempPath()) `
-        -ChildPath "$([Guid]::NewGuid())-$fileName"
+            -Path ([System.IO.Path]::GetTempPath()) `
+            -ChildPath "$([Guid]::NewGuid())-$fileName"
  
         try {
 
@@ -851,11 +938,12 @@ function Copy-AdoAttachments {
             # Download original attachment
             # ----------------------------------------------------
 
-            Invoke-WebRequest `
+            Invoke-AdoDownloadWithRetry `
                 -Uri $attachmentRelation.url `
-                -Method Get `
-                -Headers $Headers  `
-                -OutFile $tempFilePath
+                -Headers $Headers `
+                -OutFile $tempFilePath `
+                -MaxAttempts $MaxAttempts `
+                -RetryDelaySeconds $RetryDelaySeconds
 
             # Verify downloaded file
 
@@ -896,11 +984,11 @@ function Copy-AdoAttachments {
 
             $attachmentPatch = ConvertTo-Json -InputObject @(
                 @{
-                    op   = "add"
-                    path = "/relations/-"
+                    op    = "add"
+                    path  = "/relations/-"
                     value = @{
-                        rel = "AttachedFile"
-                        url = [string]$uploadedAttachment.url
+                        rel        = "AttachedFile"
+                        url        = [string]$uploadedAttachment.url
                         attributes = @{
                             name = [string]$fileName
                         }
@@ -922,7 +1010,7 @@ function Copy-AdoAttachments {
             # Link uploaded attachment to cloned work item
             # ----------------------------------------------------
 
-            $updateUrl = "$OrganizationUrl/$Project/_apis/wit/workitems/"+"$DestinationWorkItemId"+"?api-version=7.1"
+            $updateUrl = "$OrganizationUrl/$Project/_apis/wit/workitems/" + "$DestinationWorkItemId" + "?api-version=7.1"
 
             Write-Host "Linking attachment to cloned User Story..."
 
@@ -955,7 +1043,7 @@ function Copy-AdoAttachments {
             # ----------------------------------------------------
 
             
-            if($attachmentVerified){
+            if ($attachmentVerified) {
             
                 
                 Write-Host "Attachment verified successfully." -ForegroundColor Green
@@ -967,7 +1055,7 @@ function Copy-AdoAttachments {
                 }
 
             }
-            else{
+            else {
             
                 Write-Warning `
                     "Attachment was linked but could not be verified: $fileName"
@@ -1016,20 +1104,20 @@ function Copy-AdoAttachments {
     # ------------------------------------------------------------
 
     return [PSCustomObject]@{
-        Found = $attachmentRelations.Count
+        Found   = $attachmentRelations.Count
 
-        Copied = @(
+        Copied  = @(
             $attachmentResults |
-                Where-Object {
-                    $_.Status -eq "Copied"
-                }
+            Where-Object {
+                $_.Status -eq "Copied"
+            }
         ).Count
 
-        Failed = @(
+        Failed  = @(
             $attachmentResults |
-                Where-Object {
-                    $_.Status -ne "Copied"
-                }
+            Where-Object {
+                $_.Status -ne "Copied"
+            }
         ).Count
 
         Results = $attachmentResults
@@ -1038,7 +1126,7 @@ function Copy-AdoAttachments {
 
 function Invoke-UserStoryClone {
 
-     param (
+    param (
         [Parameter(Mandatory)]
         [int]$WorkItemId,
 
@@ -1311,14 +1399,14 @@ if ($workItemIds.Count -gt 0) {
     Write-Host ""
 
     $cloneResults |
-        Format-Table `
-            SourceId,
-            CloneId,
-            AttachmentsFound,
-            AttachmentsCopied,
-            AttachmentsFailed,
-            Status `
-            -AutoSize
+    Format-Table `
+        SourceId,
+    CloneId,
+    AttachmentsFound,
+    AttachmentsCopied,
+    AttachmentsFailed,
+    Status `
+        -AutoSize
     Write-Host "Processed User Stories archived to: $archivePath"
 
     if ($null -ne $templatePath) {
